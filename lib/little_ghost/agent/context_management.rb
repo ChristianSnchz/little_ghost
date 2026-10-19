@@ -19,21 +19,7 @@ module LittleGhost
     # messages. System and developer messages remain intact, and tool-use/result
     # pairs are never split merely to hit the requested count.
     #
-    # Long-running work can also keep its task in view:
-    #
-    #   class ResearchAgent < LittleGhost::Agent
-    #     manage_context preserve_invocation_request: true
-    #   end
-    #
-    # When a compaction summarizes the user message that started the current
-    # invocation, the summary message carries that request verbatim, including
-    # its attachments, so later turns still see what was asked and on whose
-    # authority. The request is added once and carried forward through later
-    # compactions. It keeps its role, so preserving it never promotes user
-    # content to trusted instructions.
-    #
-    # An +after_context_compaction+ callback can append other application
-    # state to each summary. See LittleGhost::Tools::WriteTodos::PlanContinuity.
+    # +preserve_invocation_request: true+ keeps the invocation's request verbatim in every summary that replaces it.
     #
     # Context management is inactive until +manage_context+ is declared. The
     # configured window is a fallback: provider metadata takes precedence when
@@ -68,9 +54,6 @@ module LittleGhost
         # summarize about 30% of conversation messages, and preserve the 10 most
         # recent messages. The model's declared context window takes precedence
         # over +context_window_tokens+ when available.
-        #
-        # With +preserve_invocation_request+, a summary that replaces the
-        # current invocation's request also carries that request verbatim.
         #
         # Invalid ranges raise ArgumentError when the agent class is defined.
         def manage_context(
@@ -117,8 +100,7 @@ module LittleGhost
         @invocation_requests = {}
       end
 
-      # One agent instance can serve concurrent invocations, so the request is
-      # tracked per RunContext rather than per agent.
+      # Tracked per RunContext because one agent instance can serve concurrent invocations.
       def remember_invocation_request(payload, context: nil)
         message = payload.fetch(:messages).reverse_each.find { |candidate| candidate.role == :user }
         request = message && InvocationRequest.new(message:, marker: SecureRandom.uuid)
@@ -216,8 +198,7 @@ module LittleGhost
         compacted
       end
 
-      # The request keeps the user role inside the summary message, so a
-      # preserved request never gains the authority of system instructions.
+      # Keeps the user role so a preserved request never gains system authority.
       def summary_with_invocation_request(summary, summarized, configuration, context)
         return summary unless configuration.fetch(:preserve_invocation_request)
 
