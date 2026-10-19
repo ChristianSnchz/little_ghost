@@ -360,19 +360,8 @@ module LittleGhost
       #   after_model_error(callable = nil, prepend: false) { |payload| ... } -> self
 
       ##
-      # Adds application state to a context summary before it replaces older
-      # messages.
-      #
-      # Runs only for agents that declare +manage_context+. The payload
-      # contains +:summary+ (a user Message), the frozen
-      # +:summarized_messages+ it replaces, and +:reason+ (+:threshold+ or
-      # +:overflow+). A replacement must contain +:summary+ as a user Message.
-      # Cancellation stops the invocation. A callback may accept
-      # <tt>context:</tt>.
-      #
+      # Adds application state to a context summary; the payload holds +:summary+, +:summarized_messages+, and +:reason+.
       # :singleton-method: after_context_compaction
-      # :call-seq:
-      #   after_context_compaction(callable = nil, prepend: false) { |payload| ... } -> self
 
       ##
       # Runs after validation but before a tool call starts.

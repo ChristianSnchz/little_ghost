@@ -13,21 +13,8 @@ module LittleGhost
     # updates, statuses are +pending+, +in_progress+, or +completed+, and no more
     # than one todo may be in progress. When no context is available, the tool
     # retains fallback state on its instance.
-    #
-    # Include PlanContinuity in an agent with +manage_context+ to keep the
-    # current plan in view after older messages are summarized.
     class WriteTodos < Tool
-      # PlanContinuity appends the current plan to every context summary, so an
-      # agent keeps working from its plan after compaction:
-      #
-      #   class ResearchAgent < LittleGhost::Agent
-      #     manage_context preserve_invocation_request: true
-      #     tools LittleGhost::Tools::WriteTodos
-      #     include LittleGhost::Tools::WriteTodos::PlanContinuity
-      #   end
-      #
-      # The plan is read from RunContext state when the summary is built.
-      # Summaries are unchanged while the plan is empty.
+      # Include in an agent with +manage_context+ to append the current plan to every context summary.
       module PlanContinuity
         def self.included(base) # :nodoc:
           base.after_context_compaction :append_plan_to_context_summary
