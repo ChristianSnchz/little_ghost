@@ -107,7 +107,8 @@ module LittleGhost
         messages = payload.fetch(:messages)
         request = messages.last
         return Support::Callbacks.continue unless self.class.context_management_configuration.fetch(:preserve_invocation_request)
-        return Support::Callbacks.continue unless request&.role == :user && !pinned_message?(request, context)
+        return Support::Callbacks.continue unless request&.role == :user && context&.agent_operation_id
+        return Support::Callbacks.continue if pinned_message?(request, context)
 
         pinned = Message.new(
           role: request.role,
@@ -218,9 +219,9 @@ module LittleGhost
       def summarized_metadata(messages)
         messages.flat_map do |message|
           earlier = Array(message.metadata[SUMMARIZED_METADATA_KEY]).map(&:to_h)
-          own = message.metadata.to_h.select { |key, value| key != SUMMARIZED_METADATA_KEY && scalar?(value) }
+          own = message.metadata.to_h.except(SUMMARIZED_METADATA_KEY, PINNED_METADATA_KEY).select { |_key, value| scalar?(value) }
           own.empty? ? earlier : [*earlier, own]
-        end
+        end.uniq
       end
 
       def scalar?(value)
@@ -329,7 +330,7 @@ module LittleGhost
 
       def estimated_request_tokens(request)
         characters = JSON.generate(
-          messages: request.messages.map(&:to_h),
+          messages: request.messages.map { |message| message.to_h.merge("metadata" => message.metadata.to_h.except(SUMMARIZED_METADATA_KEY)) },
           tools: request.tools,
           output_schema: request.output_schema,
           tool_choice: request.tool_choice

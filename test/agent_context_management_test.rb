@@ -273,6 +273,46 @@ class AgentContextManagementTest < Minitest::Test
     refute replaced.any? { |metadata| metadata.key?("detail") }
   end
 
+  def test_summary_provenance_does_not_count_toward_the_compaction_threshold
+    model = ScriptedModel.new(response("done"))
+    agent_class = Class.new(LittleGhost::Agent) do
+      manage_context context_window_tokens: 1_000, compression_threshold: 0.5,
+        summary_ratio: 0.5, preserve_recent_messages: 2
+    end
+    provenance = 500.times.map { |index| {"external_id" => "m-#{index}"} }
+    summary = LittleGhost::Message.new(
+      role: :user,
+      content: "Earlier work",
+      metadata: {LittleGhost::Agent::ContextManagement::SUMMARIZED_METADATA_KEY => provenance}
+    )
+
+    result = agent_class.new(model:).call("current", history: [summary, LittleGhost::Message.new(role: :assistant, content: "ok")])
+
+    assert_equal "done", result.text
+    assert_equal 1, model.requests.length
+  end
+
+  def test_summary_provenance_omits_pins_from_earlier_invocations
+    model = ScriptedModel.new(response("summary"), response("done"))
+    agent_class = Class.new(LittleGhost::Agent) do
+      manage_context context_window_tokens: 120, compression_threshold: 0.5,
+        summary_ratio: 0.5, preserve_recent_messages: 2
+    end
+    earlier = LittleGhost::Message.new(
+      role: :user,
+      content: "message-0-#{"x" * 50}",
+      metadata: {LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY => "earlier-operation", "external_id" => "m-0"}
+    )
+    history = [earlier] + (1...8).map do |index|
+      LittleGhost::Message.new(role: index.even? ? :user : :assistant, content: "message-#{index}-#{"x" * 50}")
+    end
+
+    agent_class.new(model:).call("current", history:)
+
+    replaced = model.requests.last.messages.first.metadata[LittleGhost::Agent::ContextManagement::SUMMARIZED_METADATA_KEY]
+    assert_equal [{"external_id" => "m-0"}], replaced.map(&:to_h)
+  end
+
   def test_summarizes_past_a_run_of_leading_pinned_messages
     model = ScriptedModel.new(response("summary"), response("done"))
     agent_class = Class.new(LittleGhost::Agent) do
