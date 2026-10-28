@@ -19,6 +19,17 @@ module LittleGhost
     # messages. System and developer messages remain intact, and tool-use/result
     # pairs are never split merely to hit the requested count.
     #
+    # A message whose metadata sets PINNED_METADATA_KEY is never summarized
+    # away. +true+ pins it for good; an agent operation id pins it only during
+    # that invocation. Pinned messages, with the other half of any tool-use/result
+    # pair, stay verbatim ahead of the summary and still count toward the window.
+    # Each invocation's request is pinned this way unless
+    # +preserve_invocation_request: false+ is declared.
+    #
+    # The summary's metadata lists, under SUMMARIZED_METADATA_KEY, the scalar
+    # metadata of every message it replaced, including those replaced by earlier
+    # summaries, so applications can tell compacted messages from new ones.
+    #
     # Context management is inactive until +manage_context+ is declared. The
     # configured window is a fallback: provider metadata takes precedence when
     # it advertises a positive context-window size. Compaction uses the current
@@ -34,6 +45,10 @@ module LittleGhost
       DEFAULT_SUMMARY_RATIO = 0.3 # :nodoc:
       DEFAULT_PRESERVE_RECENT_MESSAGES = 10 # :nodoc:
       ESTIMATED_CHARS_PER_TOKEN = 4 # :nodoc:
+      # Message metadata key that keeps a message out of compaction summaries.
+      PINNED_METADATA_KEY = "little_ghost.pinned"
+      # Summary metadata key listing the scalar metadata of the messages it replaced.
+      SUMMARIZED_METADATA_KEY = "little_ghost.summarized_metadata"
       OUTPUT_LIMIT_STOP_REASONS = %i[max_tokens limit_output_tokens limit_total_tokens limit_turns].freeze # :nodoc:
       def self.included(base) # :nodoc:
         base.extend(ClassMethods)
@@ -55,7 +70,8 @@ module LittleGhost
           context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
           compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
           summary_ratio: DEFAULT_SUMMARY_RATIO,
-          preserve_recent_messages: DEFAULT_PRESERVE_RECENT_MESSAGES
+          preserve_recent_messages: DEFAULT_PRESERVE_RECENT_MESSAGES,
+          preserve_invocation_request: true
         )
           context_window_tokens = Integer(context_window_tokens)
           compression_threshold = Float(compression_threshold)
@@ -74,8 +90,10 @@ module LittleGhost
             context_window_tokens:,
             compression_threshold:,
             summary_ratio:,
-            preserve_recent_messages:
+            preserve_recent_messages:,
+            preserve_invocation_request: preserve_invocation_request ? true : false
           }
+          before_invocation :pin_invocation_request
           before_model :compact_model_context
           after_model_error :compact_context_after_overflow
         end
@@ -84,6 +102,21 @@ module LittleGhost
       end
 
       private
+
+      def pin_invocation_request(payload, context: nil)
+        messages = payload.fetch(:messages)
+        request = messages.last
+        return Support::Callbacks.continue unless self.class.context_management_configuration.fetch(:preserve_invocation_request)
+        return Support::Callbacks.continue unless request&.role == :user && context&.agent_operation_id
+        return Support::Callbacks.continue if pinned_message?(request, context)
+
+        pinned = Message.new(
+          role: request.role,
+          content: request.content,
+          metadata: request.metadata.to_h.merge(PINNED_METADATA_KEY => context.agent_operation_id)
+        )
+        Support::Callbacks.replace(payload.merge(messages: [*messages[...-1], pinned]))
+      end
 
       def compact_model_context(payload, context: nil)
         request = payload.fetch(:request)
@@ -125,16 +158,19 @@ module LittleGhost
 
       def summarize_oldest_messages(request, configuration, context, parent_operation_id:)
         trusted, conversation = request.messages.partition { |message| %i[system developer].include?(message.role) }
+        pinned = pinned_messages(conversation, context)
+        kept = conversation.take_while { |message| pinned.include?(message) }
+        conversation = conversation.drop(kept.length)
         preserve = configuration.fetch(:preserve_recent_messages)
         split = [(conversation.length * configuration.fetch(:summary_ratio)).floor, 1].max
         split = [split, conversation.length - preserve].min
         raise ProtocolError, "Not enough conversation history to compact" unless split.positive?
 
         split = safe_summary_split(conversation, split)
-        to_summarize = conversation.first(split)
+        hoisted, to_summarize = conversation.first(split).partition { |message| pinned.include?(message) }
         summary = generate_context_summary(to_summarize, request, context, parent_operation_id:)
         ModelRequest.new(
-          messages: [*trusted, summary, *conversation.drop(split)],
+          messages: [*trusted, *kept, *hoisted, summary, *conversation.drop(split)],
           tools: request.tools,
           settings: request.settings,
           output_schema: request.output_schema,
@@ -162,6 +198,38 @@ module LittleGhost
           context_window_tokens:
         )
         compacted
+      end
+
+      def pinned_messages(messages, context)
+        pinned = Set.new.compare_by_identity
+        messages.each_cons(2) do |use, result|
+          next unless tool_pair?(use, result)
+          next unless pinned_message?(use, context) || pinned_message?(result, context)
+
+          pinned << use << result
+        end
+        pinned.merge(messages.select { |message| pinned_message?(message, context) })
+      end
+
+      def pinned_message?(message, context)
+        value = message.metadata[PINNED_METADATA_KEY]
+        value == true || (!value.nil? && value == context&.agent_operation_id)
+      end
+
+      def summarized_metadata(messages)
+        messages.flat_map do |message|
+          earlier = Array(message.metadata[SUMMARIZED_METADATA_KEY]).map(&:to_h)
+          own = message.metadata.to_h.except(SUMMARIZED_METADATA_KEY, PINNED_METADATA_KEY).select { |_key, value| scalar?(value) }
+          own.empty? ? earlier : [*earlier, own]
+        end.uniq
+      end
+
+      def scalar?(value)
+        value.is_a?(String) || value.is_a?(Numeric) || value == true || value == false
+      end
+
+      def tool_pair?(use, result)
+        use.content.any?(Content::ToolUse) && result.content.any?(Content::ToolResult)
       end
 
       def safe_summary_split(messages, split)
@@ -230,7 +298,12 @@ module LittleGhost
           **model_attributes,
           **usage_attributes(response.usage)
         )
-        Message.new(role: :user, content: response.message.content)
+        provenance = summarized_metadata(messages)
+        Message.new(
+          role: :user,
+          content: response.message.content,
+          metadata: provenance.empty? ? {} : {SUMMARIZED_METADATA_KEY => provenance}
+        )
       rescue => error
         instrument(
           :model_stop,
@@ -257,7 +330,7 @@ module LittleGhost
 
       def estimated_request_tokens(request)
         characters = JSON.generate(
-          messages: request.messages.map(&:to_h),
+          messages: request.messages.map { |message| message.to_h.merge("metadata" => message.metadata.to_h.except(SUMMARIZED_METADATA_KEY)) },
           tools: request.tools,
           output_schema: request.output_schema,
           tool_choice: request.tool_choice
