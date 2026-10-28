@@ -26,6 +26,10 @@ module LittleGhost
     # Each invocation's request is pinned this way unless
     # +preserve_invocation_request: false+ is declared.
     #
+    # The summary's metadata lists, under SUMMARIZED_METADATA_KEY, the scalar
+    # metadata of every message it replaced, including those replaced by earlier
+    # summaries, so applications can tell compacted messages from new ones.
+    #
     # Context management is inactive until +manage_context+ is declared. The
     # configured window is a fallback: provider metadata takes precedence when
     # it advertises a positive context-window size. Compaction uses the current
@@ -43,6 +47,8 @@ module LittleGhost
       ESTIMATED_CHARS_PER_TOKEN = 4 # :nodoc:
       # Message metadata key that keeps a message out of compaction summaries.
       PINNED_METADATA_KEY = "little_ghost.pinned"
+      # Summary metadata key listing the scalar metadata of the messages it replaced.
+      SUMMARIZED_METADATA_KEY = "little_ghost.summarized_metadata"
       OUTPUT_LIMIT_STOP_REASONS = %i[max_tokens limit_output_tokens limit_total_tokens limit_turns].freeze # :nodoc:
       def self.included(base) # :nodoc:
         base.extend(ClassMethods)
@@ -209,6 +215,18 @@ module LittleGhost
         value == true || (!value.nil? && value == context&.agent_operation_id)
       end
 
+      def summarized_metadata(messages)
+        messages.flat_map do |message|
+          earlier = Array(message.metadata[SUMMARIZED_METADATA_KEY]).map(&:to_h)
+          own = message.metadata.to_h.select { |key, value| key != SUMMARIZED_METADATA_KEY && scalar?(value) }
+          own.empty? ? earlier : [*earlier, own]
+        end
+      end
+
+      def scalar?(value)
+        value.is_a?(String) || value.is_a?(Numeric) || value == true || value == false
+      end
+
       def tool_pair?(use, result)
         use.content.any?(Content::ToolUse) && result.content.any?(Content::ToolResult)
       end
@@ -279,7 +297,12 @@ module LittleGhost
           **model_attributes,
           **usage_attributes(response.usage)
         )
-        Message.new(role: :user, content: response.message.content)
+        provenance = summarized_metadata(messages)
+        Message.new(
+          role: :user,
+          content: response.message.content,
+          metadata: provenance.empty? ? {} : {SUMMARIZED_METADATA_KEY => provenance}
+        )
       rescue => error
         instrument(
           :model_stop,

@@ -244,6 +244,35 @@ class AgentContextManagementTest < Minitest::Test
     assert_nil model.requests.last.messages.last.metadata[LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY]
   end
 
+  def test_summaries_record_the_scalar_metadata_of_every_message_they_replace
+    model = ScriptedModel.new(
+      response("summary-one"), tool_use_response("call-1"),
+      response("summary-two"), response("done")
+    )
+    agent_class = Class.new(LittleGhost::Agent) do
+      manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
+        summary_ratio: 0.5, preserve_recent_messages: 2
+    end
+    lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
+    history = 4.times.map do |index|
+      LittleGhost::Message.new(
+        role: index.even? ? :user : :assistant,
+        content: "message-#{index}",
+        metadata: {external_id: "m-#{index}", committed_at: "2026-10-0#{index + 1}", detail: {nested: true}}
+      )
+    end
+
+    agent_class.new(model:, tools: [lookup]).call("Refund order 42", history:)
+
+    summaries = model.requests.filter_map do |request|
+      request.messages.find { |message| message.metadata.key?(LittleGhost::Agent::ContextManagement::SUMMARIZED_METADATA_KEY) }
+    end
+    replaced = summaries.last.metadata[LittleGhost::Agent::ContextManagement::SUMMARIZED_METADATA_KEY].map(&:to_h)
+    assert_equal %w[m-0 m-1 m-2 m-3], replaced.map { |metadata| metadata.fetch("external_id") }
+    assert_equal "2026-10-01", replaced.first.fetch("committed_at")
+    refute replaced.any? { |metadata| metadata.key?("detail") }
+  end
+
   def test_summarizes_past_a_run_of_leading_pinned_messages
     model = ScriptedModel.new(response("summary"), response("done"))
     agent_class = Class.new(LittleGhost::Agent) do
