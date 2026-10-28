@@ -60,7 +60,7 @@ class AgentContextManagementTest < Minitest::Test
 
     assert_equal 2, model.requests.length
     assert_empty model.requests.first.tools
-    assert_includes model.requests.first.messages.first.text, "conversation summarizer"
+    assert_equal :system, model.requests.first.messages.first.role
     assert_equal "summary", model.requests.last.messages.first.text
     refute_includes model.requests.last.messages.map(&:text).join, "message-0-"
     assert_equal 16, result.usage.total_tokens
@@ -172,7 +172,7 @@ class AgentContextManagementTest < Minitest::Test
     )
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
-        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
+        summary_ratio: 0.5, preserve_recent_messages: 2
     end
     lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
     history = 4.times.map do |index|
@@ -196,7 +196,7 @@ class AgentContextManagementTest < Minitest::Test
     summarizer_inputs.each { |input| refute_includes input, "Refund order 42" }
   end
 
-  def test_summarizes_the_invocation_request_by_default
+  def test_summarizes_the_invocation_request_when_preservation_is_off
     model = ScriptedModel.new(
       response("summary-one"), tool_use_response("call-1"),
       response("summary-two"), tool_use_response("call-2"),
@@ -204,7 +204,7 @@ class AgentContextManagementTest < Minitest::Test
     )
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
-        summary_ratio: 0.5, preserve_recent_messages: 2
+        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: false
     end
     lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
     history = 4.times.map do |index|
@@ -221,7 +221,7 @@ class AgentContextManagementTest < Minitest::Test
     model = ScriptedModel.new(response("summary"), response("done"))
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 120, compression_threshold: 0.5,
-        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
+        summary_ratio: 0.5, preserve_recent_messages: 2
     end
     history = 8.times.map do |index|
       LittleGhost::Message.new(role: index.even? ? :user : :assistant, content: "message-#{index}-#{"x" * 50}")
@@ -236,8 +236,8 @@ class AgentContextManagementTest < Minitest::Test
 
   def test_a_subclass_can_turn_off_invocation_request_pinning
     model = ScriptedModel.new(response("done"))
-    parent = Class.new(LittleGhost::Agent) { manage_context preserve_invocation_request: true }
-    agent_class = Class.new(parent) { manage_context }
+    parent = Class.new(LittleGhost::Agent) { manage_context }
+    agent_class = Class.new(parent) { manage_context preserve_invocation_request: false }
 
     agent_class.new(model:).call("current")
 
@@ -270,7 +270,7 @@ class AgentContextManagementTest < Minitest::Test
     model = ScriptedModel.new(response("summary"), response("done"))
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 120, compression_threshold: 0.5,
-        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
+        summary_ratio: 0.5, preserve_recent_messages: 2
     end
     earlier = LittleGhost::Message.new(
       role: :user,
@@ -334,7 +334,7 @@ class AgentContextManagementTest < Minitest::Test
     )
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 1_000_000, compression_threshold: 1,
-        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
+        summary_ratio: 0.5, preserve_recent_messages: 2
     end
     lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
 

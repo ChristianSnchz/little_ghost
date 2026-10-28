@@ -23,7 +23,8 @@ module LittleGhost
     # away. +true+ pins it for good; an agent operation id pins it only during
     # that invocation. Pinned messages, with the other half of any tool-use/result
     # pair, stay verbatim ahead of the summary and still count toward the window.
-    # +preserve_invocation_request: true+ pins each invocation's request this way.
+    # Each invocation's request is pinned this way unless
+    # +preserve_invocation_request: false+ is declared.
     #
     # Context management is inactive until +manage_context+ is declared. The
     # configured window is a fallback: provider metadata takes precedence when
@@ -64,7 +65,7 @@ module LittleGhost
           compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
           summary_ratio: DEFAULT_SUMMARY_RATIO,
           preserve_recent_messages: DEFAULT_PRESERVE_RECENT_MESSAGES,
-          preserve_invocation_request: false
+          preserve_invocation_request: true
         )
           context_window_tokens = Integer(context_window_tokens)
           compression_threshold = Float(compression_threshold)
