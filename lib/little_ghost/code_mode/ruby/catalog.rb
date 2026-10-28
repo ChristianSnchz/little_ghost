@@ -53,7 +53,12 @@ module LittleGhost
           return schema["enum"].map(&:inspect).join(" | ") if schema["enum"]
 
           alternatives = schema["anyOf"] || schema["oneOf"]
-          return alternatives.map { |child| schema_type(child) }.uniq.join(" | ") if alternatives
+          if alternatives
+            return alternatives.map do |child|
+              type = schema_type(child)
+              type.include?(" & ") ? "(#{type})" : type
+            end.uniq.join(" | ")
+          end
           if schema["allOf"]
             return schema["allOf"].map do |child|
               type = schema_type(child)
@@ -88,7 +93,9 @@ module LittleGhost
           return "{#{fields.join(", ")}}" unless fields.empty?
 
           additional = schema["additionalProperties"]
-          additional.is_a?(Hash) ? "Hash[String, #{schema_type(additional)}]" : "Hash[String, untyped]"
+          return "Hash[String, #{schema_type(additional)}]" if additional.is_a?(Hash)
+
+          (additional == false) ? "{}" : "Hash[String, untyped]"
         end
 
         def schema_constraints(schema)

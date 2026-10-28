@@ -718,7 +718,12 @@ class CodeModeTest < Minitest::Test
             {"anyOf" => [{"properties" => {"value" => {"type" => "string"}}}, {"type" => "null"}]}
           ]},
           "range" => {"type" => "array", "items" => [{"type" => "integer"}, {"type" => "integer"}]},
-          "labels" => {"type" => "object", "additionalProperties" => {"type" => "boolean"}}
+          "labels" => {"type" => "object", "additionalProperties" => {"type" => "boolean"}},
+          "scope" => {"anyOf" => [
+            {"allOf" => [{"properties" => {"team" => {"type" => "string"}}}, {"properties" => {"role" => {"type" => "string"}}}]},
+            {"type" => "null"}
+          ]},
+          "options" => {"type" => "object", "additionalProperties" => false}
         },
         "required" => ["id"]
       }
@@ -732,6 +737,8 @@ class CodeModeTest < Minitest::Test
     assert_includes instructions, "# @param change [{field: String} & ({value: String} | nil)] optional"
     assert_includes instructions, "# @param range [[Integer, Integer]] optional"
     assert_includes instructions, "# @param labels [Hash[String, bool]] optional"
+    assert_includes instructions, "# @param scope [({team: String} & {role: String}) | nil] optional"
+    assert_includes instructions, "# @param options [{}] optional"
     refute_includes instructions, "[untyped]"
   end
 
