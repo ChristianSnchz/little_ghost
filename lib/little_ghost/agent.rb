@@ -62,7 +62,6 @@ module LittleGhost
       after_initialize
       before_invocation after_invocation
       before_model after_model after_model_error
-      after_context_compaction
       before_tool after_tool
     ].freeze # :nodoc:
     ExecutedTool = Data.define(:result, :execution_result) do # :nodoc:
@@ -358,10 +357,6 @@ module LittleGhost
       # :singleton-method: after_model_error
       # :call-seq:
       #   after_model_error(callable = nil, prepend: false) { |payload| ... } -> self
-
-      ##
-      # Adds application state to a context summary; the payload holds +:summary+, +:summarized_messages+, and +:reason+.
-      # :singleton-method: after_context_compaction
 
       ##
       # Runs after validation but before a tool call starts.
@@ -933,8 +928,7 @@ module LittleGhost
       @artifact_lifecycle @assembly_closed @assembly_definition @assembly_mutex
       @assembly_tool_batch_sizes @assembly_transition @assembly_transitions
       @assembly_transitions_mutex @close_mutex @closed @code_mode_declaration
-      @code_mode_runtime @context_management_mutex @delegation_activity
-      @exclusive_tools_mutex @executor @invocation_requests
+      @code_mode_runtime @delegation_activity @exclusive_tools_mutex @executor
       @interjections_mutex @max_tool_calls @max_tool_result_tokens @max_turns
       @model @model_settings @owns_resources @run @runtime @sandbox @standalone
       @framework_prompts @framework_prompt_invocation_paths

@@ -163,48 +163,61 @@ class AgentContextManagementTest < Minitest::Test
     assert_empty model.requests.first.tools
   end
 
-  def test_preserves_the_invocation_request_through_repeated_compactions
+  def test_pins_the_invocation_request_through_repeated_compactions
     model = ScriptedModel.new(
-      tool_use_response("call-1"),
-      response("summary-one"),
-      tool_use_response("call-2"),
-      response("summary-two"),
-      response("done")
+      response("summary-one"), tool_use_response("call-1"),
+      response("summary-two"), tool_use_response("call-2"),
+      response("summary-three"), tool_use_response("call-3"),
+      response("summary-four"), response("done")
     )
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
         summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
     end
     lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
+    history = 4.times.map do |index|
+      LittleGhost::Message.new(role: index.even? ? :user : :assistant, content: "message-#{index}")
+    end
 
-    result = agent_class.new(model:, tools: [lookup]).call("Refund order 42 if it shipped late")
+    result = agent_class.new(model:, tools: [lookup]).call("Refund order 42 if it shipped late", history:)
 
     assert_equal "done", result.text
-    after_first, after_second = model.requests.values_at(2, 4).map { |request| request.messages.first }
-    assert_equal :user, after_first.role
-    assert_includes after_first.text, "summary-one"
-    assert_includes after_first.text, framework_prompt("context_management/summary/invocation_request")
-    assert_includes after_second.text, "summary-two"
-    model.requests.values_at(2, 4).each do |request|
-      assert_equal 1, request.messages.sum { |message| message.text.scan("Refund order 42").length }
+    %w[summary-three summary-four].each do |summary|
+      request, compacted = model.requests.find { |candidate| candidate.messages[1]&.text == summary }.messages.first(2)
+      assert_equal :user, request.role
+      assert_equal "Refund order 42 if it shipped late", request.text
+      assert_equal :user, compacted.role
     end
+    final = model.requests.last.messages
+    assert_equal 1, final.count { |message| message.text.include?("Refund order 42") }
+    assert_kind_of String, final.first.metadata[LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY]
+    summarizer_inputs = model.requests.select { |request| request.tools.empty? }.map { |request| request.messages.map(&:text).join }
+    assert_equal 4, summarizer_inputs.length
+    summarizer_inputs.each { |input| refute_includes input, "Refund order 42" }
   end
 
-  def test_leaves_the_invocation_request_to_the_summary_by_default
-    model = ScriptedModel.new(tool_use_response("call-1"), response("summary-one"), response("done"))
+  def test_summarizes_the_invocation_request_by_default
+    model = ScriptedModel.new(
+      response("summary-one"), tool_use_response("call-1"),
+      response("summary-two"), tool_use_response("call-2"),
+      response("summary-three"), response("done")
+    )
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
         summary_ratio: 0.5, preserve_recent_messages: 2
     end
     lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
+    history = 4.times.map do |index|
+      LittleGhost::Message.new(role: index.even? ? :user : :assistant, content: "message-#{index}")
+    end
 
-    agent_class.new(model:, tools: [lookup]).call("Refund order 42 if it shipped late")
+    agent_class.new(model:, tools: [lookup]).call("Refund order 42 if it shipped late", history:)
 
-    assert_equal "summary-one", model.requests.last.messages.first.text
+    assert_equal "summary-three", model.requests.last.messages.first.text
     refute_includes model.requests.last.messages.map(&:text).join, "Refund order 42"
   end
 
-  def test_does_not_change_a_summary_while_the_request_is_still_in_context
+  def test_leaves_a_pinned_request_in_place_while_it_is_recent
     model = ScriptedModel.new(response("summary"), response("done"))
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 120, compression_threshold: 0.5,
@@ -218,83 +231,117 @@ class AgentContextManagementTest < Minitest::Test
 
     assert_equal "summary", model.requests.last.messages.first.text
     assert_equal "current", model.requests.last.messages.last.text
+    assert model.requests.last.messages.last.metadata[LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY]
   end
 
-  def test_after_context_compaction_callbacks_extend_the_summary
-    model = ScriptedModel.new(tool_use_response("call-1"), response("summary-one"), response("done"))
-    observed = []
+  def test_a_subclass_can_turn_off_invocation_request_pinning
+    model = ScriptedModel.new(response("done"))
+    parent = Class.new(LittleGhost::Agent) { manage_context preserve_invocation_request: true }
+    agent_class = Class.new(parent) { manage_context }
+
+    agent_class.new(model:).call("current")
+
+    assert_nil model.requests.last.messages.last.metadata[LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY]
+  end
+
+  def test_summarizes_past_a_run_of_leading_pinned_messages
+    model = ScriptedModel.new(response("summary"), response("done"))
     agent_class = Class.new(LittleGhost::Agent) do
       manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
         summary_ratio: 0.5, preserve_recent_messages: 2
-      after_context_compaction do |payload|
-        observed << payload.slice(:reason, :summarized_messages)
-        summary = payload.fetch(:summary)
-        LittleGhost::Support::Callbacks.replace(
-          payload.merge(summary: LittleGhost::Message.new(role: :user, content: [*summary.content, "Ticket SUP-7"]))
-        )
-      end
     end
-    lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
-
-    agent_class.new(model:, tools: [lookup]).call("Refund order 42")
-
-    assert_equal :threshold, observed.first.fetch(:reason)
-    assert_equal ["Refund order 42"], observed.first.fetch(:summarized_messages).map(&:text)
-    assert observed.first.fetch(:summarized_messages).frozen?
-    assert_equal "summary-oneTicket SUP-7", model.requests.last.messages.first.text
-  end
-
-  def test_skips_compaction_when_a_callback_replaces_the_summary_with_a_non_user_message
-    model = ScriptedModel.new(tool_use_response("call-1"), response("summary-one"), response("done"))
-    agent_class = Class.new(LittleGhost::Agent) do
-      manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
-        summary_ratio: 0.5, preserve_recent_messages: 2
-      after_context_compaction do |payload|
-        LittleGhost::Support::Callbacks.replace(
-          payload.merge(summary: LittleGhost::Message.new(role: :system, content: "elevated"))
-        )
-      end
+    pinned = {LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY => true}
+    history = 10.times.map do |index|
+      LittleGhost::Message.new(
+        role: index.even? ? :user : :assistant,
+        content: "message-#{index}",
+        metadata: (index < 6) ? pinned : {}
+      )
     end
-    lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
 
-    agent_class.new(model:, tools: [lookup]).call("Refund order 42")
+    agent_class.new(model:).call("current", history:)
 
     texts = model.requests.last.messages.map(&:text)
-    refute_includes texts, "elevated"
-    assert_equal "Refund order 42", texts.first
+    assert_equal [*6.times.map { |index| "message-#{index}" }, "summary", "message-8", "message-9", "current"], texts
+    refute_includes model.requests.first.messages.map(&:text), "message-0"
   end
 
-  def test_plan_continuity_appends_the_current_plan_to_the_summary
-    plan = {
-      "plan_title" => "Refund review",
-      "todos" => [
-        {"id" => "logs", "title" => "Check logs", "status" => "completed", "details" => "No carrier scan"},
-        {"id" => "refund", "title" => "Issue refund", "status" => "in_progress"}
-      ]
-    }
-    write = LittleGhost::Message.new(
-      role: :assistant,
-      content: LittleGhost::Content::ToolUse.new(id: "call-1", name: "write_todos", input: plan)
+  def test_summarizes_a_request_pinned_by_an_earlier_invocation
+    model = ScriptedModel.new(response("summary"), response("done"))
+    agent_class = Class.new(LittleGhost::Agent) do
+      manage_context context_window_tokens: 120, compression_threshold: 0.5,
+        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
+    end
+    earlier = LittleGhost::Message.new(
+      role: :user,
+      content: "message-0-#{"x" * 50}",
+      metadata: {LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY => "earlier-operation"}
     )
+    history = [earlier] + (1...8).map do |index|
+      LittleGhost::Message.new(role: index.even? ? :user : :assistant, content: "message-#{index}-#{"x" * 50}")
+    end
+
+    agent_class.new(model:).call("current", history:)
+
+    assert_equal "summary", model.requests.last.messages.first.text
+    refute_includes model.requests.last.messages.map(&:text).join, "message-0-"
+  end
+
+  def test_keeps_permanently_pinned_messages_with_their_tool_results
+    model = ScriptedModel.new(response("summary"), response("done"))
+    agent_class = Class.new(LittleGhost::Agent) do
+      manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
+        summary_ratio: 0.5, preserve_recent_messages: 2
+    end
+    pinned = {LittleGhost::Agent::ContextManagement::PINNED_METADATA_KEY => true}
+    history = [
+      LittleGhost::Message.new(role: :user, content: "Always answer in French", metadata: pinned),
+      LittleGhost::Message.new(
+        role: :assistant,
+        content: %w[call-1 call-2].map { |id| LittleGhost::Content::ToolUse.new(id:, name: "lookup", input: {}) }
+      ),
+      LittleGhost::Message.new(
+        role: :tool,
+        content: %w[call-1 call-2].map do |id|
+          LittleGhost::Content::ToolResult.new(tool_use_id: id, content: "found", status: :success)
+        end,
+        metadata: pinned
+      ),
+      LittleGhost::Message.new(role: :assistant, content: "answer"),
+      LittleGhost::Message.new(role: :user, content: "question"),
+      LittleGhost::Message.new(role: :assistant, content: "reply"),
+      LittleGhost::Message.new(role: :user, content: "follow-up"),
+      LittleGhost::Message.new(role: :assistant, content: "reply")
+    ]
+
+    agent_class.new(model:).call("current", history:)
+
+    messages = model.requests.last.messages
+    assert_equal "Always answer in French", messages[0].text
+    assert_equal %w[call-1 call-2], messages[1].content.grep(LittleGhost::Content::ToolUse).map(&:id)
+    assert_equal %w[call-1 call-2], messages[2].content.grep(LittleGhost::Content::ToolResult).map(&:tool_use_id)
+    assert_equal "summary", messages[3].text
+    refute_includes messages.map(&:text), "answer"
+  end
+
+  def test_pins_the_invocation_request_when_compacting_after_an_overflow
     model = ScriptedModel.new(
-      LittleGhost::ModelResponse.new(message: write, stop_reason: :tool_use, usage: LittleGhost::Usage.new),
-      response("summary-one"),
+      tool_use_response("call-1"),
+      tool_use_response("call-2"),
+      LittleGhost::ContextWindowOverflowError.new("too large"),
+      response("summary"),
       response("done")
     )
     agent_class = Class.new(LittleGhost::Agent) do
-      manage_context context_window_tokens: 1_000, compression_threshold: 0.01,
-        summary_ratio: 0.5, preserve_recent_messages: 2
-      tools LittleGhost::Tools::WriteTodos
-      include LittleGhost::Tools::WriteTodos::PlanContinuity
+      manage_context context_window_tokens: 1_000_000, compression_threshold: 1,
+        summary_ratio: 0.5, preserve_recent_messages: 2, preserve_invocation_request: true
     end
+    lookup = LittleGhost::Tool.define(name: "lookup", description: "Look up an order") { "found" }
 
-    agent_class.new(model:).call("Refund order 42")
+    result = agent_class.new(model:, tools: [lookup]).call("Refund order 42 if it shipped late")
 
-    summary = model.requests.last.messages.first.text
-    assert_includes summary, "summary-one"
-    assert_includes summary, "Current plan: Refund review"
-    assert_includes summary, "- [completed] Check logs (`logs`): No carrier scan"
-    assert_includes summary, "- [in_progress] Issue refund (`refund`)"
+    assert_equal "done", result.text
+    assert_equal ["Refund order 42 if it shipped late", "summary"], model.requests.last.messages.first(2).map(&:text)
   end
 
   private
@@ -316,9 +363,5 @@ class AgentContextManagementTest < Minitest::Test
       stop_reason: :tool_use,
       usage: LittleGhost::Usage.new
     )
-  end
-
-  def framework_prompt(key)
-    LittleGhost::FrameworkPrompts.new.render(key)
   end
 end
